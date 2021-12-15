@@ -14,7 +14,7 @@ from tqdm import tqdm
 import json
 import numpy as np
 from warnings import warn
-
+from .pose import CameraExtrinsics
 
 class NSVFDataset(DatasetBase):
     """
@@ -45,6 +45,7 @@ class NSVFDataset(DatasetBase):
         data_bbox_scale : float = 1.1,                    # Only used if normalize_by_bbox
         cam_scale_factor : float = 0.95,
         normalize_by_camera: bool = True,
+        extrinsics_net : CameraExtrinsics = None,
         **kwargs
     ):
         super().__init__()
@@ -58,7 +59,7 @@ class NSVFDataset(DatasetBase):
         self.device = device
         self.permutation = permutation
         self.epoch_size = epoch_size
-        all_c2w = []
+        self.extrinsics_net = extrinsics_net
         all_gt = []
 
         split_name = split if split != "test_train" else "train"
@@ -113,18 +114,26 @@ class NSVFDataset(DatasetBase):
         full_size = [0, 0]
         rsz_h = rsz_w = 0
 
-        for img_fname in tqdm(img_files):
+        all_c2w = []
+        for i, img_fname in enumerate(tqdm(img_files)):
             img_path = path.join(root, img_dir_name, img_fname)
             image = imageio.imread(img_path)
-            pose_fname = path.splitext(img_fname)[0] + ".txt"
-            pose_path = path.join(root, pose_dir_name, pose_fname)
-            #  intrin_path = path.join(root, intrin_dir_name, pose_fname)
 
-            cam_mtx = np.loadtxt(pose_path).reshape(-1, 4)
-            if len(cam_mtx) == 3:
-                bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
-                cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
-            all_c2w.append(torch.from_numpy(cam_mtx))  # C2W (4, 4) OpenCV
+            if not self.extrinsics_net:
+                pose_fname = path.splitext(img_fname)[0] + ".txt"
+                pose_path = path.join(root, pose_dir_name, pose_fname)
+                cam_mtx = np.loadtxt(pose_path).reshape(-1, 4)
+                if len(cam_mtx) == 3:
+                    bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                    cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+                all_c2w.append(torch.from_numpy(cam_mtx))  # C2W (4, 4) OpenCV
+            else:
+                cam_mtx = self.extrinsics_net(i)  # TODO: need update_cams function every training step
+                if len(cam_mtx) == 3:
+                    bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                    cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+                all_c2w.papend(cam_mtx)
+
             full_size = list(image.shape[:2])
             rsz_h, rsz_w = [round(hw * scale) for hw in full_size]
             if dynamic_resize:
@@ -132,8 +141,9 @@ class NSVFDataset(DatasetBase):
 
             all_gt.append(torch.from_numpy(image))
 
-
         self.c2w_f64 = torch.stack(all_c2w)
+        print(self.c2w_f64)
+        breakpoint()
 
         print('NORMALIZE BY?', 'bbox' if normalize_by_bbox else 'camera' if normalize_by_camera else 'manual')
         if normalize_by_bbox:

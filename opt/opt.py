@@ -18,9 +18,10 @@ import numpy as np
 import math
 import argparse
 import cv2
-from util.dataset import datasets
-from util.util import Timing, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
 from util import config_util
+from util.dataset import datasets
+from util.pose import CameraIntrinsics, CameraExtrinsics
+from util.util import Timing, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
 
 from warnings import warn
 from datetime import datetime
@@ -260,12 +261,29 @@ torch.manual_seed(20200823)
 np.random.seed(20200823)
 
 factor = 1
+"""
 dset = datasets[args.dataset_type](
                args.data_dir,
                split="train",
                device=device,
                factor=factor,
                n_images=args.n_train,
+               **config_util.build_data_options(args))
+"""
+
+# Initialize camera intrinsic/extrinsic neural nets
+n_imgs = len(os.listdir(os.path.join(args.data_dir, 'images')))
+extrinsics = CameraExtrinsics(num_cams=n_imgs, learn_R=True, learn_t=True).to(device)
+extrinsics.train()
+opt_pose = torch.optim.Adam(extrinsics.parameters(), lr=0.001)
+
+dset = datasets[args.dataset_type](
+               args.data_dir,
+               split="train",
+               device=device,
+               factor=factor,
+               n_images=args.n_train,
+               extrinsics_net=extrinsics,
                **config_util.build_data_options(args))
 
 if args.background_nlayers > 0 and not dset.should_use_background:
@@ -276,6 +294,7 @@ dset_test = datasets[args.dataset_type](
 
 global_start_time = datetime.now()
 
+# Initialize sparse grid
 grid = svox2.SparseGrid(reso=reso_list[reso_id],
                         center=dset.scene_center,
                         radius=dset.scene_radius,
@@ -320,7 +339,6 @@ elif grid.basis_type == svox2.BASIS_TYPE_MLP:
                     grid.basis_mlp.parameters(),
                     lr=args.lr_basis
                 )
-
 
 grid.requires_grad_(True)
 config_util.setup_render_opts(grid.opt, args)

@@ -12,3 +12,8 @@ update-conda:
 install-pip:
 	$(CONDA_ACTIVATE) $(ENV_NAME)
 	pip install .
+
+download-tt:
+	gsutil -m cp -r gs://data.netdron.es/TanksAndTempleBG.tar.gz data
+	tar -xvf data/*.gz
+	rm data/*.gz
