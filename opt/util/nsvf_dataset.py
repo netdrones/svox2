@@ -56,10 +56,13 @@ class NSVFDataset(DatasetBase):
         if scale is None:
             scale = 1.0
 
+        self.root = root
         self.device = device
         self.permutation = permutation
         self.epoch_size = epoch_size
         self.extrinsics_net = extrinsics_net
+        self.normalize_by_bbox = normalize_by_bbox
+        self.normalize_by_camera = normalize_by_camera
         all_gt = []
 
         split_name = split if split != "test_train" else "train"
@@ -132,7 +135,7 @@ class NSVFDataset(DatasetBase):
                 if len(cam_mtx) == 3:
                     bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
                     cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
-                all_c2w.papend(cam_mtx)
+                all_c2w.append(cam_mtx)
 
             full_size = list(image.shape[:2])
             rsz_h, rsz_w = [round(hw * scale) for hw in full_size]
@@ -142,40 +145,7 @@ class NSVFDataset(DatasetBase):
             all_gt.append(torch.from_numpy(image))
 
         self.c2w_f64 = torch.stack(all_c2w)
-        print(self.c2w_f64)
-        breakpoint()
-
-        print('NORMALIZE BY?', 'bbox' if normalize_by_bbox else 'camera' if normalize_by_camera else 'manual')
-        if normalize_by_bbox:
-            # Not used, but could be helpful
-            bbox_path = path.join(root, "bbox.txt")
-            if path.exists(bbox_path):
-                bbox_data = np.loadtxt(bbox_path)
-                center = (bbox_data[:3] + bbox_data[3:6]) * 0.5
-                radius = (bbox_data[3:6] - bbox_data[:3]) * 0.5 * data_bbox_scale
-
-                # Recenter
-                self.c2w_f64[:, :3, 3] -= center
-                # Rescale
-                scene_scale = 1.0 / radius.max()
-            else:
-                warn('normalize_by_bbox=True but bbox.txt was not available')
-        elif normalize_by_camera:
-            norm_pose_files = sorted(os.listdir(path.join(root, pose_dir_name)), key=sort_key)
-            norm_poses = np.stack([np.loadtxt(path.join(root, pose_dir_name, x)).reshape(-1, 4)
-                                    for x in norm_pose_files], axis=0)
-
-            # Select subset of files
-            T, sscale = similarity_from_cameras(norm_poses)
-
-            self.c2w_f64 = torch.from_numpy(T) @ self.c2w_f64
-            scene_scale = cam_scale_factor * sscale
-
-            #  center = np.mean(norm_poses[:, :3, 3], axis=0)
-            #  radius = np.median(np.linalg.norm(norm_poses[:, :3, 3] - center, axis=-1))
-            #  self.c2w_f64[:, :3, 3] -= center
-            #  scene_scale = cam_scale_factor / radius
-            #  print('good', self.c2w_f64[:2], scene_scale)
+        self.normalize_c2w()
 
         print('scene_scale', scene_scale)
         self.c2w_f64[:, :3, 3] *= scene_scale
@@ -226,3 +196,24 @@ class NSVFDataset(DatasetBase):
             # Rays are not needed for testing
             self.h, self.w = self.h_full, self.w_full
             self.intrins : Intrin = self.intrins_full
+
+    def normalize_c2w(self, pose_dir_name=None):
+        print('NORMALIZE BY?', 'bbox' if self.normalize_by_bbox else 'camera' if self.normalize_by_camera else 'manual')
+        if self.normalize_by_bbox:
+            bbox_path = path.join(root, "bbox.txt")
+            if path.exists(bbox_path):
+                bbox_data = np.loadtxt(bbox_path)
+                center = (bbox_data[:3] + bbox_data[3:6]) * 0.5
+                radius = (bbox_data[3:6] - bbox_data[:3]) * 0.5 * data_bbox_scale
+
+                # Recenter
+                self.c2w_f64[:, :3, 3] -= center
+                # Rescale
+                scene_scale = 1.0 / radius.max()
+            else:
+                warn('normalize_by_bbox=True but bbox.txt was not available')
+        # TODO: figure out how to do this for neural net generated poses
+        elif self.normalize_by_camera:
+            norm_pose_files = sorted(os.listdir(path.join(self.root, pose_dir_name)), key=sort_key)
+            norm_poses = np.stack([np.loadtxt(path.join(self.root, pose_dir_name, x)).reshape(-1, 4)
+                                    for x in norm_pose_files], axis=0)

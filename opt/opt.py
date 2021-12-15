@@ -283,7 +283,7 @@ dset = datasets[args.dataset_type](
                device=device,
                factor=factor,
                n_images=args.n_train,
-               extrinsics_net=extrinsics,
+               # extrinsics_net=extrinsics,
                **config_util.build_data_options(args))
 
 if args.background_nlayers > 0 and not dset.should_use_background:
