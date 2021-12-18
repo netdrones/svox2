@@ -283,7 +283,7 @@ dset = datasets[args.dataset_type](
                device=device,
                factor=factor,
                n_images=args.n_train,
-               # extrinsics_net=extrinsics,
+               extrinsics_net=extrinsics,
                **config_util.build_data_options(args))
 
 if args.background_nlayers > 0 and not dset.should_use_background:
@@ -506,6 +506,11 @@ while True:
             #  with Timing("loss_comp"):
             mse = F.mse_loss(rgb_gt, rgb_pred)
 
+            # Update c2w estimation
+            opt_pose.step()
+            opt_pose.zero_grad()
+            dset.update_cams(extrinsics)
+
             # Stats
             mse_num : float = mse.detach().item()
             psnr = -10.0 * math.log10(mse_num)
@@ -595,7 +600,7 @@ while True:
             if gstep_id >= args.lr_fg_begin_step:
                 grid.optim_density_step(lr_sigma, beta=args.rms_beta, optim=args.sigma_optim)
                 grid.optim_sh_step(lr_sh, beta=args.rms_beta, optim=args.sh_optim)
-            if grid.use_background:
+            if grid.use_background:  # True in default
                 grid.optim_background_step(lr_sigma_bg, lr_color_bg, beta=args.rms_beta, optim=args.bg_optim)
             if gstep_id >= args.lr_basis_begin_step:
                 if grid.basis_type == svox2.BASIS_TYPE_3D_TEXTURE:

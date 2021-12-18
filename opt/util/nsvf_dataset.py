@@ -16,6 +16,11 @@ import numpy as np
 from warnings import warn
 from .pose import CameraExtrinsics
 
+def sort_key(x):
+    if len(x) > 2 and x[1] == "_":
+        return x[2:]
+    return x
+
 class NSVFDataset(DatasetBase):
     """
     Extended NSVF dataset loader
@@ -58,6 +63,7 @@ class NSVFDataset(DatasetBase):
 
         self.root = root
         self.device = device
+        self.scene_scale = scene_scale
         self.permutation = permutation
         self.epoch_size = epoch_size
         self.extrinsics_net = extrinsics_net
@@ -71,10 +77,6 @@ class NSVFDataset(DatasetBase):
 
         self.split = split
 
-        def sort_key(x):
-            if len(x) > 2 and x[1] == "_":
-                return x[2:]
-            return x
         def look_for_dir(cands, required=True):
             for cand in cands:
                 if path.isdir(path.join(root, cand)):
@@ -87,6 +89,10 @@ class NSVFDataset(DatasetBase):
         pose_dir_name = look_for_dir(["poses", "pose"])
         #  intrin_dir_name = look_for_dir(["intrin"], required=False)
         img_files = sorted(os.listdir(path.join(root, img_dir_name)), key=sort_key)
+
+        self.img_files = img_files
+        self.img_dir_name = img_dir_name
+        self.pose_dir_name = pose_dir_name
 
         # Select subset of files
         if self.split == "train" or self.split == "test_train":
@@ -131,7 +137,7 @@ class NSVFDataset(DatasetBase):
                     cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
                 all_c2w.append(torch.from_numpy(cam_mtx))  # C2W (4, 4) OpenCV
             else:
-                cam_mtx = self.extrinsics_net(i)  # TODO: need update_cams function every training step
+                cam_mtx = self.extrinsics_net(i).cpu()  # TODO: need update_cams function every training step
                 if len(cam_mtx) == 3:
                     bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
                     cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
@@ -145,7 +151,7 @@ class NSVFDataset(DatasetBase):
             all_gt.append(torch.from_numpy(image))
 
         self.c2w_f64 = torch.stack(all_c2w)
-        self.normalize_c2w()
+        self.normalize_c2w(pose_dir_name)
 
         print('scene_scale', scene_scale)
         self.c2w_f64[:, :3, 3] *= scene_scale
@@ -197,8 +203,9 @@ class NSVFDataset(DatasetBase):
             self.h, self.w = self.h_full, self.w_full
             self.intrins : Intrin = self.intrins_full
 
-    def normalize_c2w(self, pose_dir_name=None):
-        print('NORMALIZE BY?', 'bbox' if self.normalize_by_bbox else 'camera' if self.normalize_by_camera else 'manual')
+    def normalize_c2w(self, pose_dir_name=None, print_msg=True):
+        if print_msg:
+            print('NORMALIZE BY?', 'bbox' if self.normalize_by_bbox else 'camera' if self.normalize_by_camera else 'manual')
         if self.normalize_by_bbox:
             bbox_path = path.join(root, "bbox.txt")
             if path.exists(bbox_path):
@@ -212,8 +219,21 @@ class NSVFDataset(DatasetBase):
                 scene_scale = 1.0 / radius.max()
             else:
                 warn('normalize_by_bbox=True but bbox.txt was not available')
-        # TODO: figure out how to do this for neural net generated poses
         elif self.normalize_by_camera:
             norm_pose_files = sorted(os.listdir(path.join(self.root, pose_dir_name)), key=sort_key)
             norm_poses = np.stack([np.loadtxt(path.join(self.root, pose_dir_name, x)).reshape(-1, 4)
                                     for x in norm_pose_files], axis=0)
+
+    def update_cams(self, extrinsics_net):
+        all_c2w = []
+        for i, img_fname in enumerate(self.img_files):
+            img_path = path.join(self.root, self.img_dir_name, img_fname)
+            cam_mtx = extrinsics_net(i).cpu()
+            if len(cam_mtx) == 3:
+                bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+            all_c2w.append(cam_mtx)
+
+        self.normalize_c2w(self.pose_dir_name, print_msg=False)
+        self.c2w_f64[:, :3, 3] *= self.scene_scale
+        self.c2w = self.c2w_f64.float()
