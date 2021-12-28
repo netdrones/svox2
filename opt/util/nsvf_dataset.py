@@ -14,12 +14,7 @@ from tqdm import tqdm
 import json
 import numpy as np
 from warnings import warn
-from .pose import CameraExtrinsics
 
-def sort_key(x):
-    if len(x) > 2 and x[1] == "_":
-        return x[2:]
-    return x
 
 class NSVFDataset(DatasetBase):
     """
@@ -50,7 +45,6 @@ class NSVFDataset(DatasetBase):
         data_bbox_scale : float = 1.1,                    # Only used if normalize_by_bbox
         cam_scale_factor : float = 0.95,
         normalize_by_camera: bool = True,
-        extrinsics_net : CameraExtrinsics = None,
         **kwargs
     ):
         super().__init__()
@@ -61,14 +55,10 @@ class NSVFDataset(DatasetBase):
         if scale is None:
             scale = 1.0
 
-        self.root = root
         self.device = device
-        self.scene_scale = scene_scale
         self.permutation = permutation
         self.epoch_size = epoch_size
-        self.extrinsics_net = extrinsics_net
-        self.normalize_by_bbox = normalize_by_bbox
-        self.normalize_by_camera = normalize_by_camera
+        all_c2w = []
         all_gt = []
 
         split_name = split if split != "test_train" else "train"
@@ -77,6 +67,10 @@ class NSVFDataset(DatasetBase):
 
         self.split = split
 
+        def sort_key(x):
+            if len(x) > 2 and x[1] == "_":
+                return x[2:]
+            return x
         def look_for_dir(cands, required=True):
             for cand in cands:
                 if path.isdir(path.join(root, cand)):
@@ -89,10 +83,6 @@ class NSVFDataset(DatasetBase):
         pose_dir_name = look_for_dir(["poses", "pose"])
         #  intrin_dir_name = look_for_dir(["intrin"], required=False)
         img_files = sorted(os.listdir(path.join(root, img_dir_name)), key=sort_key)
-
-        self.img_files = img_files
-        self.img_dir_name = img_dir_name
-        self.pose_dir_name = pose_dir_name
 
         # Select subset of files
         if self.split == "train" or self.split == "test_train":
@@ -123,26 +113,18 @@ class NSVFDataset(DatasetBase):
         full_size = [0, 0]
         rsz_h = rsz_w = 0
 
-        all_c2w = []
-        for i, img_fname in enumerate(tqdm(img_files)):
+        for img_fname in tqdm(img_files):
             img_path = path.join(root, img_dir_name, img_fname)
             image = imageio.imread(img_path)
+            pose_fname = path.splitext(img_fname)[0] + ".txt"
+            pose_path = path.join(root, pose_dir_name, pose_fname)
+            #  intrin_path = path.join(root, intrin_dir_name, pose_fname)
 
-            if not self.extrinsics_net:
-                pose_fname = path.splitext(img_fname)[0] + ".txt"
-                pose_path = path.join(root, pose_dir_name, pose_fname)
-                cam_mtx = np.loadtxt(pose_path).reshape(-1, 4)
-                if len(cam_mtx) == 3:
-                    bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
-                    cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
-                all_c2w.append(torch.from_numpy(cam_mtx))  # C2W (4, 4) OpenCV
-            else:
-                cam_mtx = self.extrinsics_net(i).cpu()  # TODO: need update_cams function every training step
-                if len(cam_mtx) == 3:
-                    bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
-                    cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
-                all_c2w.append(cam_mtx)
-
+            cam_mtx = np.loadtxt(pose_path).reshape(-1, 4)
+            if len(cam_mtx) == 3:
+                bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+            all_c2w.append(torch.from_numpy(cam_mtx))  # C2W (4, 4) OpenCV
             full_size = list(image.shape[:2])
             rsz_h, rsz_w = [round(hw * scale) for hw in full_size]
             if dynamic_resize:
@@ -150,8 +132,40 @@ class NSVFDataset(DatasetBase):
 
             all_gt.append(torch.from_numpy(image))
 
+
         self.c2w_f64 = torch.stack(all_c2w)
-        self.normalize_c2w(pose_dir_name)
+
+        print('NORMALIZE BY?', 'bbox' if normalize_by_bbox else 'camera' if normalize_by_camera else 'manual')
+        if normalize_by_bbox:
+            # Not used, but could be helpful
+            bbox_path = path.join(root, "bbox.txt")
+            if path.exists(bbox_path):
+                bbox_data = np.loadtxt(bbox_path)
+                center = (bbox_data[:3] + bbox_data[3:6]) * 0.5
+                radius = (bbox_data[3:6] - bbox_data[:3]) * 0.5 * data_bbox_scale
+
+                # Recenter
+                self.c2w_f64[:, :3, 3] -= center
+                # Rescale
+                scene_scale = 1.0 / radius.max()
+            else:
+                warn('normalize_by_bbox=True but bbox.txt was not available')
+        elif normalize_by_camera:
+            norm_pose_files = sorted(os.listdir(path.join(root, pose_dir_name)), key=sort_key)
+            norm_poses = np.stack([np.loadtxt(path.join(root, pose_dir_name, x)).reshape(-1, 4)
+                                    for x in norm_pose_files], axis=0)
+
+            # Select subset of files
+            T, sscale = similarity_from_cameras(norm_poses)
+
+            self.c2w_f64 = torch.from_numpy(T) @ self.c2w_f64
+            scene_scale = cam_scale_factor * sscale
+
+            #  center = np.mean(norm_poses[:, :3, 3], axis=0)
+            #  radius = np.median(np.linalg.norm(norm_poses[:, :3, 3] - center, axis=-1))
+            #  self.c2w_f64[:, :3, 3] -= center
+            #  scene_scale = cam_scale_factor / radius
+            #  print('good', self.c2w_f64[:2], scene_scale)
 
         print('scene_scale', scene_scale)
         self.c2w_f64[:, :3, 3] *= scene_scale
@@ -202,38 +216,3 @@ class NSVFDataset(DatasetBase):
             # Rays are not needed for testing
             self.h, self.w = self.h_full, self.w_full
             self.intrins : Intrin = self.intrins_full
-
-    def normalize_c2w(self, pose_dir_name=None, print_msg=True):
-        if print_msg:
-            print('NORMALIZE BY?', 'bbox' if self.normalize_by_bbox else 'camera' if self.normalize_by_camera else 'manual')
-        if self.normalize_by_bbox:
-            bbox_path = path.join(root, "bbox.txt")
-            if path.exists(bbox_path):
-                bbox_data = np.loadtxt(bbox_path)
-                center = (bbox_data[:3] + bbox_data[3:6]) * 0.5
-                radius = (bbox_data[3:6] - bbox_data[:3]) * 0.5 * data_bbox_scale
-
-                # Recenter
-                self.c2w_f64[:, :3, 3] -= center
-                # Rescale
-                scene_scale = 1.0 / radius.max()
-            else:
-                warn('normalize_by_bbox=True but bbox.txt was not available')
-        elif self.normalize_by_camera:
-            norm_pose_files = sorted(os.listdir(path.join(self.root, pose_dir_name)), key=sort_key)
-            norm_poses = np.stack([np.loadtxt(path.join(self.root, pose_dir_name, x)).reshape(-1, 4)
-                                    for x in norm_pose_files], axis=0)
-
-    def update_cams(self, extrinsics_net):
-        all_c2w = []
-        for i, img_fname in enumerate(self.img_files):
-            img_path = path.join(self.root, self.img_dir_name, img_fname)
-            cam_mtx = extrinsics_net(i).cpu()
-            if len(cam_mtx) == 3:
-                bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
-                cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
-            all_c2w.append(cam_mtx)
-
-        self.normalize_c2w(self.pose_dir_name, print_msg=False)
-        self.c2w_f64[:, :3, 3] *= self.scene_scale
-        self.c2w = self.c2w_f64.float()

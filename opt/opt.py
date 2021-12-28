@@ -21,7 +21,7 @@ import cv2
 from util import config_util
 from util.dataset import datasets
 from util.pose import CameraIntrinsics, CameraExtrinsics
-from util.util import Timing, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
+from util.util import Timing, Intrin, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
 
 from warnings import warn
 from datetime import datetime
@@ -261,18 +261,13 @@ torch.manual_seed(20200823)
 np.random.seed(20200823)
 
 factor = 1
-"""
-dset = datasets[args.dataset_type](
-               args.data_dir,
-               split="train",
-               device=device,
-               factor=factor,
-               n_images=args.n_train,
-               **config_util.build_data_options(args))
-"""
 
 # Initialize camera intrinsic/extrinsic neural nets
-n_imgs = len(os.listdir(os.path.join(args.data_dir, 'images')))
+try:
+    n_imgs = len(os.listdir(os.path.join(args.data_dir, 'images')))
+except FileNotFoundError:
+    n_imgs = len(os.listdir(os.path.join(args.data_dir, 'rgb')))
+
 extrinsics = CameraExtrinsics(num_cams=n_imgs, learn_R=True, learn_t=True).to(device)
 extrinsics.train()
 opt_pose = torch.optim.Adam(extrinsics.parameters(), lr=0.001)
@@ -283,7 +278,6 @@ dset = datasets[args.dataset_type](
                device=device,
                factor=factor,
                n_images=args.n_train,
-               extrinsics_net=extrinsics,
                **config_util.build_data_options(args))
 
 if args.background_nlayers > 0 and not dset.should_use_background:
@@ -492,10 +486,56 @@ while True:
                 lr_basis = args.lr_basis * lr_basis_factor
 
             batch_end = min(batch_begin + args.batch_size, epoch_size)
-            batch_origins = dset.rays.origins[batch_begin: batch_end]
-            batch_dirs = dset.rays.dirs[batch_begin: batch_end]
-            rgb_gt = dset.rays.gt[batch_begin: batch_end]
+
+            # TODO: need to generate c2w/rays every training step
+            # batch_origins = dset.rays.origins[batch_begin: batch_end]
+            # batch_dirs = dset.rays.dirs[batch_begin: batch_end]
+
+            # Get intrinsics
+            intrin_path = path.join(root, "intrinsics.txt")
+            assert path.exists(intrin_path), "intrinsics unavilable"
+            try:
+                K: np.ndarray = np.loadtxt(intrin_path)
+                fx = K[0, 0]
+                fy = K[1, 1]
+                cx = K[0, 2]
+                cy = K[1, 2]
+            except:
+                with open(intrin_path, "r") as f:
+                    spl = f.readline().split()
+                    fx = f = float(spl[0])
+                    cx = float(spl[1])
+                    cy = float(spl[2])
+            intrins_full : Intrin = Intrin(fx, fy, cx, cy)
+
+            # Estimate extrinsics
+            c2w = []
+            img_1 = math.floor(batch_begin / 552384)
+            img_2 = math.floor(batch_end / 552384)
+
+            cam_mtx = extrinsics(img_1).cpu()
+            if len(cam_mtx) == 3:
+                bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+            c2w.append(cam_mtx)
+
+            if img_1 != img_2:
+                cam_mtx = extrinsics(img_2).cpu()
+                if len(cam_mtx) == 3:
+                    bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
+                    cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
+                c2w.append(cam_mtx)
+
+            # origins = c2w[:, None, :3, 3].expand(-1, 552384, -1).contiguous()
+            # orgins = origins.view(-1, 3)
+            # need intrinsics
+           c2w = torch.stack(c2w).float()
+
+            breakpoint()
+
             rays = svox2.Rays(batch_origins, batch_dirs)
+
+            rgb_gt = dset.rays.gt[batch_begin: batch_end]
 
             #  with Timing("volrend_fused"):
             rgb_pred = grid.volume_render_fused(rays, rgb_gt,
@@ -509,7 +549,6 @@ while True:
             # Update c2w estimation
             opt_pose.step()
             opt_pose.zero_grad()
-            dset.update_cams(extrinsics)
 
             # Stats
             mse_num : float = mse.detach().item()

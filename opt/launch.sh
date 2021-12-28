@@ -12,4 +12,4 @@ echo CKPT $CKPT_DIR
 
 # CUDA_VISIBLE_DEVICES=$2 nohup python -u opt.py -t $CKPT_DIR ${@:3} > $NOHUP_FILE 2>&1 &
 CUDA_VISIBLE_DEVICES=$2 python -u opt.py -t $CKPT_DIR ${@:3}
-echo DETACH
+# echo DETACH
