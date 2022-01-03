@@ -21,7 +21,8 @@ import cv2
 from util import config_util
 from util.dataset import datasets
 from util.pose import CameraIntrinsics, CameraExtrinsics
-from util.util import Timing, Intrin, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
+from util.util import Rays, Timing, Intrin, \
+                      select_or_shuffle_rays, get_expon_lr_func, generate_dirs_equirect, viridis_cmap
 
 from warnings import warn
 from datetime import datetime
@@ -492,7 +493,7 @@ while True:
             # batch_dirs = dset.rays.dirs[batch_begin: batch_end]
 
             # Get intrinsics
-            intrin_path = path.join(root, "intrinsics.txt")
+            intrin_path = path.join(args.data_dir, "intrinsics.txt")
             assert path.exists(intrin_path), "intrinsics unavilable"
             try:
                 K: np.ndarray = np.loadtxt(intrin_path)
@@ -507,11 +508,12 @@ while True:
                     cx = float(spl[1])
                     cy = float(spl[2])
             intrins_full : Intrin = Intrin(fx, fy, cx, cy)
+            intrins = intrins_full
 
             # Estimate extrinsics
             c2w = []
-            img_1 = math.floor(batch_begin / 552384)
-            img_2 = math.floor(batch_end / 552384)
+            img_1 = math.floor(batch_begin / (dset.h * dset.w))
+            img_2 = math.floor(batch_end / (dset.h * dset.w))
 
             cam_mtx = extrinsics(img_1).cpu()
             if len(cam_mtx) == 3:
@@ -525,28 +527,35 @@ while True:
                     bottom = np.array([[0.0, 0.0, 0.0, 1.0]])
                     cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
                 c2w.append(cam_mtx)
+            c2w = torch.stack(c2w).float()
 
-            # origins = c2w[:, None, :3, 3].expand(-1, 552384, -1).contiguous()
-            # orgins = origins.view(-1, 3)
-            # need intrinsics
-           c2w = torch.stack(c2w).float()
-
-            breakpoint()
-
+            # Generate rays
+            yy, xx = torch.meshgrid(torch.arange(dset.h, dtype=torch.float32) + 0.5,
+                                    torch.arange(dset.w, dtype=torch.float32) + 0.5)
+            xx = (xx - intrins.cx) / intrins.fx
+            yy = (yy - intrins.cy) / intrins.fy
+            zz = torch.ones_like(xx)
+            dirs = torch.stack((xx, yy, zz), dim=-1)
+            dirs /= torch.norm(dirs, dim=-1, keepdim=True)
+            dirs = dirs.reshape(1, -1, 3, 1)
+            dirs = dirs.view(-1, 3)
+            origins = c2w[:, None, :3, 3].expand(-1, dset.h * dset.w, -1).contiguous()  # TODO: don't need to greedily do this
+            origins = origins.view(-1, 3)
+            rays_init = Rays(origins=origins, dirs=dirs, gt=dset.gt)
+            rays_init = rays_init.to(device)
+            batch_origins = rays_init.origins[batch_begin : batch_end]
+            batch_dirs = rays_init.dirs[batch_begin : batch_end]
             rays = svox2.Rays(batch_origins, batch_dirs)
+            rgb_gt = rays_init.gt[batch_begin: batch_end]
 
-            rgb_gt = dset.rays.gt[batch_begin: batch_end]
-
-            #  with Timing("volrend_fused"):
+            # Make RGB prediction
             rgb_pred = grid.volume_render_fused(rays, rgb_gt,
                     beta_loss=args.lambda_beta,
                     sparsity_loss=args.lambda_sparsity,
                     randomize=args.enable_random)
 
-            #  with Timing("loss_comp"):
+            # Calculate loss and update extrinsic network
             mse = F.mse_loss(rgb_gt, rgb_pred)
-
-            # Update c2w estimation
             opt_pose.step()
             opt_pose.zero_grad()
 
