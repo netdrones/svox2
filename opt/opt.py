@@ -546,7 +546,7 @@ while True:
             batch_origins = rays_init.origins[batch_begin : batch_end]
             batch_dirs = rays_init.dirs[batch_begin : batch_end]
             rays = svox2.Rays(batch_origins, batch_dirs)
-            rgb_gt = rays_init.gt[batch_begin: batch_end]
+            rgb_gt = dset.rays.gt[batch_begin : batch_end]
 
             # Make RGB prediction
             rgb_pred = grid.volume_render_fused(rays, rgb_gt,
