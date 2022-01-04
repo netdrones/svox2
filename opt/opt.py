@@ -528,6 +528,7 @@ while True:
                     cam_mtx = np.concatenate([cam_mtx, bottom], axis=0)
                 c2w.append(cam_mtx)
             c2w = torch.stack(c2w).float()
+            print(c2w)
 
             # Generate rays
             yy, xx = torch.meshgrid(torch.arange(dset.h, dtype=torch.float32) + 0.5,
@@ -556,8 +557,6 @@ while True:
 
             # Calculate loss and update extrinsic network
             mse = F.mse_loss(rgb_gt, rgb_pred)
-            opt_pose.step()
-            opt_pose.zero_grad()
 
             # Stats
             mse_num : float = mse.detach().item()
@@ -656,6 +655,15 @@ while True:
                 elif grid.basis_type == svox2.BASIS_TYPE_MLP:
                     optim_basis_mlp.step()
                     optim_basis_mlp.zero_grad()
+
+            # Update c2w net weights
+            print(list(extrinsics.parameters())[0].grad)
+            breakpoint()
+            mse.requires_grad = True
+            mse.backward()
+            opt_pose.step()
+            opt_pose.zero_grad()
+
 
     train_step()
     gc.collect()
